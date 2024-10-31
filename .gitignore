@@ -1,0 +1,11 @@
+.env
+bin/Activate.ps1
+bin/activate.fish
+bin/activate.csh
+bin/activate
+/bin
+/etc
+/lib
+/lib64
+/share
+
