@@ -9,3 +9,11 @@ altair
 xlrd
 python-dateutil
 pytz
+PyPDF2
+python-docx
+regex
+sqlite3
+re
+json
+io
+tempfile
