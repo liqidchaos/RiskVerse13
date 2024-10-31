@@ -1067,7 +1067,6 @@ def analyze_control_gaps(current_controls, target_requirements, client):
 REQUIREMENT TO ANALYZE:
 ID: {target_req['ID']}
 Text: {target_req['Requirement']}
-
 CURRENT CONTROLS:
 {json.dumps(current_controls, indent=2)}
 
