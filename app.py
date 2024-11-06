@@ -15,6 +15,8 @@ import json
 # Load environment variables from .env file
 load_dotenv()
 
+st.set_page_config(layout="wide", page_title="Control Analysis")
+
 def init_db():
     conn = sqlite3.connect('data.db')
     c = conn.cursor()
@@ -42,6 +44,21 @@ def init_db():
                       category TEXT,
                       description TEXT,
                       requirements TEXT)''')
+        conn.commit()
+    
+    # Initialize issues table
+    try:
+        c.execute("SELECT title FROM issues LIMIT 1")
+    except sqlite3.OperationalError:
+        # Create issues table if it doesn't exist
+        c.execute('''CREATE TABLE IF NOT EXISTS issues
+                     (id INTEGER PRIMARY KEY,
+                      title TEXT NOT NULL,
+                      description TEXT,
+                      category TEXT,
+                      severity TEXT,
+                      status TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         conn.commit()
     
     conn.close()
@@ -1259,6 +1276,11 @@ def main():
         if st.button("Control Guidance", key="sidebar_control_guidance_1"):
             st.session_state.page = "Control Guidance"
     
+    # Issue Management Section
+    st.sidebar.header("Issue Management")
+    if st.sidebar.button("Issue Management", key="sidebar_issue_mgmt_1"):
+        st.session_state.page = "Issue Management"
+    
     # Initialize database
     init_db()
     
@@ -1330,6 +1352,9 @@ def main():
     elif st.session_state.page == "Control Guidance":
         guidance_management_page()
     
+    elif st.session_state.page == "Issue Management":
+        issue_management_page()
+    
     else:  # Pathway Management
         pathway_management_page()
 
@@ -1353,6 +1378,209 @@ def find_control_column(df):
                 return col
     
     return None
+
+def issue_management_page():
+    st.title("Issue Management")
+    
+    # Initialize session state for real-time search
+    if "search_text" not in st.session_state:
+        st.session_state.search_text = ""
+    if "search_desc" not in st.session_state:
+        st.session_state.search_desc = ""
+
+    def on_text_change():
+        st.session_state.search_text = st.session_state.title_input
+        st.session_state.search_desc = st.session_state.desc_input
+    
+    tab1, tab2, tab3 = st.tabs(["View Issues", "Add Issue", "Bulk Upload"])
+    
+    with tab1:
+        st.header("View Issues")
+        # Add search box
+        search_query = st.text_input("Search issues:", key="search_issues")
+        
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            if search_query:
+                # Use semantic search when query is provided
+                cursor.execute("""
+                    SELECT id, title, description, category, status, severity, created_at 
+                    FROM issues 
+                    WHERE title LIKE ? OR description LIKE ?
+                    ORDER BY created_at DESC
+                """, (f"%{search_query}%", f"%{search_query}%"))
+            else:
+                # Show all issues when no search query
+                cursor.execute("""
+                    SELECT id, title, description, category, status, severity, created_at 
+                    FROM issues
+                    ORDER BY created_at DESC
+                """)
+            
+            issues = cursor.fetchall()
+            
+            # Display total count
+            total_issues = len(issues)
+            if search_query:
+                st.write(f"Found {total_issues} issue{'s' if total_issues != 1 else ''} matching '{search_query}'")
+            else:
+                st.write(f"Total issues: {total_issues}")
+            
+            if issues:
+                for issue in issues:
+                    with st.expander(f"{issue[1]} - {issue[4]}"):
+                        st.write(f"**Description:** {issue[2]}")
+                        st.write(f"**Category:** {issue[3]}")
+                        st.write(f"**Severity:** {issue[5]}")
+                        st.write(f"**Created:** {issue[6]}")
+            else:
+                st.info("No issues found")
+            
+            conn.close()
+    
+    with tab2:
+        st.header("Add New Issue")
+        title = st.text_input("Title", key="title_input", on_change=on_text_change)
+        description = st.text_area("Description", key="desc_input", on_change=on_text_change)
+        
+        # Show similar issues while typing
+        if st.session_state.search_text or st.session_state.search_desc:
+            conn = get_db_connection()
+            if conn:
+                cursor = conn.cursor()
+                # Search for similar issues based on title or description
+                cursor.execute("""
+                    SELECT title, description, category, severity, status 
+                    FROM issues 
+                    WHERE title LIKE ? OR description LIKE ?
+                    LIMIT 5
+                """, (f"%{st.session_state.search_text}%", f"%{st.session_state.search_desc}%"))
+                
+                similar_issues = cursor.fetchall()
+                if similar_issues:
+                    st.warning("⚠️ Similar existing issues found:")
+                    for issue in similar_issues:
+                        with st.expander(f"Similar: {issue[0]}"):
+                            st.write(f"**Description:** {issue[1]}")
+                            st.write(f"**Category:** {issue[2]}")
+                            st.write(f"**Severity:** {issue[3]}")
+                            st.write(f"**Status:** {issue[4]}")
+                conn.close()
+        
+        # Continue with the rest of the form
+        category = st.selectbox("Category", ["Technical", "Process", "People", "Other"])
+        severity = st.selectbox("Severity", ["Low", "Medium", "High", "Critical"])
+        status = st.selectbox("Status", ["Open", "In Progress", "Resolved", "Closed"])
+        
+        if st.button("Add Issue"):
+            if title and description:
+                conn = get_db_connection()
+                if conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO issues (title, description, category, severity, status)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (title, description, category, severity, status))
+                    conn.commit()
+                    conn.close()
+                    st.success("Issue added successfully!")
+                    st.rerun()
+            else:
+                st.error("Title and description are required")
+    
+    with tab3:
+        st.header("Bulk Upload Issues")
+        uploaded_file = st.file_uploader("Upload Excel or CSV file", type=['xlsx', 'csv'])
+        
+        if uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file)
+                
+                # Convert column names to lowercase for case-insensitive comparison
+                df.columns = df.columns.str.lower().str.strip()
+                
+                st.subheader("Preview of uploaded data")
+                st.dataframe(df.head())
+                
+                # Define required columns and their possible variations
+                required_columns_mapping = {
+                    'title': ['title', 'issue title', 'name', 'issue name'],
+                    'description': ['description', 'desc', 'issue description', 'details'],
+                    'category': ['category', 'type', 'issue type', 'issue category'],
+                    'severity': ['severity', 'priority', 'impact', 'severity level'],
+                    'status': ['status', 'state', 'issue status']
+                }
+                
+                # Check for missing columns with variations
+                missing_columns = []
+                column_mapping = {}  # Store the actual column names to use
+                
+                for req_col, variations in required_columns_mapping.items():
+                    found = False
+                    for var in variations:
+                        if var in df.columns:
+                            column_mapping[req_col] = var
+                            found = True
+                            break
+                    if not found:
+                        missing_columns.append(req_col)
+                
+                if missing_columns:
+                    st.error(f"Missing required columns: {', '.join(missing_columns)}")
+                    st.info("Your file should contain these columns (or variations):")
+                    for col, variations in required_columns_mapping.items():
+                        st.write(f"- {col}: {', '.join(variations)}")
+                else:
+                    if st.button("Upload Issues"):
+                        conn = get_db_connection()
+                        if conn:
+                            cursor = conn.cursor()
+                            success_count = 0
+                            error_count = 0
+                            
+                            for _, row in df.iterrows():
+                                try:
+                                    cursor.execute("""
+                                        INSERT INTO issues (title, description, category, severity, status)
+                                        VALUES (?, ?, ?, ?, ?)
+                                    """, (
+                                        row[column_mapping['title']],
+                                        row[column_mapping['description']],
+                                        row[column_mapping['category']],
+                                        row[column_mapping['severity']],
+                                        row[column_mapping['status']]
+                                    ))
+                                    success_count += 1
+                                except Exception as e:
+                                    error_count += 1
+                                    st.error(f"Error inserting row: {str(e)}")
+                            
+                            conn.commit()
+                            conn.close()
+                            
+                            st.success(f"Successfully uploaded {success_count} issues")
+                            if error_count > 0:
+                                st.warning(f"Failed to upload {error_count} issues")
+                            
+                            st.rerun()
+                
+            except Exception as e:
+                st.error(f"Error processing file: {str(e)}")
+
+def get_db_connection():
+    """Get a connection to the SQLite database"""
+    try:
+        conn = sqlite3.connect('data.db')
+        # Enable foreign key support
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+    except Exception as e:
+        st.error(f"Error connecting to database: {str(e)}")
+        return None
 
 if __name__ == "__main__":
     main()
