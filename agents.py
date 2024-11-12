@@ -201,7 +201,7 @@ expert_agents = [
     ),
     EnhancedAgent(
         "Cyber Technology Information Security Head",
-        ["lllama-3.2-3b-preview"],
+        ["llama-3.2-3b-preview"],
         "Iterating through data and refining data from other experts and forming new ideas",
         """You are the Head of Cyber Technology Information Security (CTIS) Risk, tasked with synthesizing insights and providing accurate responses and direction based on the request. Your task is to:
 
