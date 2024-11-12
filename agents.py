@@ -138,8 +138,8 @@ class EnhancedAgent:
 expert_agents = [
     EnhancedAgent(
         "CyberSecurity Analyst",
-        ["llama-3.1-8b-instant"],
-        "Analyzing Cyber Risks, Regulations, Processes and Controls",
+        ["llama-3.2-3b-preview"],
+        "cybersecurity analysis",
         """You are an expert Cybersecurity Analyst specializing in Technology Risk Management. Your task is to:
 
         1. Identify and assess potential cybersecurity threats and vulnerabilities specific to the given scenario.
@@ -159,7 +159,7 @@ expert_agents = [
     ),
     EnhancedAgent(
         "Information Security Analyst",
-        ["llama-3.1-8b-instant"],
+        ["llama-3.2-3b-preview"],
         "Analyzing Information Security Risks, Regulations, Processes and Controls",
         """You are an expert Information Security Analyst specializing in Technology Risk Management. Your task is to:
 
@@ -180,7 +180,7 @@ expert_agents = [
     ),
     EnhancedAgent(
         "Technology Risk Expert",
-        ["llama-3.1-8b-instant"],
+        ["llama-3.2-3b-preview"],
         "Detailed analysis of Cyber, Info Sec Technology Risks, Regulations, Processes and Controls",
         """You are a Technology Risk Expert with a comprehensive view of cybersecurity and information security in Technology Risk Management. Your task is to:
 
@@ -201,7 +201,7 @@ expert_agents = [
     ),
     EnhancedAgent(
         "Cyber Technology Information Security Head",
-        ["llama-3.1-8b-instant"],
+        ["lllama-3.2-3b-preview"],
         "Iterating through data and refining data from other experts and forming new ideas",
         """You are the Head of Cyber Technology Information Security (CTIS) Risk, tasked with synthesizing insights and providing accurate responses and direction based on the request. Your task is to:
 
@@ -224,7 +224,7 @@ expert_agents = [
 
 aggregator_agent = EnhancedAgent(
     "Aggregator",
-    ["llama-3.1-70b-versatile"],
+    ["llama-3.2-90b-vision-preview"],
     "synthesizing and decision making",
     """You are an expert aggregator and decision-making facilitator in Technology Risk Management. Your task is to:
 
