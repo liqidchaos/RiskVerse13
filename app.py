@@ -11,6 +11,7 @@ import docx
 import re
 from io import StringIO
 import json
+import plotly.express as px
 
 # Load environment variables from .env file
 load_dotenv()
@@ -1249,6 +1250,239 @@ def process_controls_file(uploaded_files, api_key):
 
     return None
 
+def visualization_page():
+    st.title("Issue Analytics Dashboard")
+    
+    conn = get_db_connection()
+    if not conn:
+        st.error("Could not connect to database")
+        return
+        
+    try:
+        # Load all issues into a DataFrame
+        df_issues = pd.read_sql_query("""
+            SELECT title, description, category, severity, status, created_at 
+            FROM issues
+        """, conn)
+        
+        # Load pathways and guidance data
+        df_pathways = pd.read_sql_query("SELECT * FROM pathways", conn)
+        df_guidance = pd.read_sql_query("SELECT * FROM guidance", conn)
+        
+        if df_issues.empty:
+            st.info("No issues found in the database")
+            return
+        
+        # Convert created_at to datetime
+        df_issues['created_at'] = pd.to_datetime(df_issues['created_at'])
+        
+        # Create tabs for different views
+        tab1, tab2, tab3 = st.tabs(["Issues", "Pathway Management", "Control Guidance"])
+        
+        with tab1:
+            # Create layout
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Issues by Status
+                st.subheader("Issues by Status")
+                status_counts = df_issues['status'].value_counts()
+                st.plotly_chart(
+                    px.pie(
+                        values=status_counts.values,
+                        names=status_counts.index,
+                        title="Issue Distribution by Status"
+                    ),
+                    use_container_width=True
+                )
+                
+            with col2:
+                # Issues by Severity with custom colors
+                st.subheader("Issues by Severity")
+                severity_counts = df_issues['severity'].value_counts()
+                fig_severity = px.bar(
+                    x=severity_counts.index,
+                    y=severity_counts.values,
+                    title="Issues by Severity Level",
+                    labels={'x': 'Severity', 'y': 'Count'}
+                )
+                
+                # Update bar colors based on severity
+                severity_colors = {
+                    'Low': '#2ECC71',      # Green
+                    'Medium': '#F1C40F',   # Yellow
+                    'High': '#E67E22',     # Orange
+                    'Critical': '#E74C3C'  # Red
+                }
+                fig_severity.update_traces(
+                    marker_color=[severity_colors.get(sev, '#808080') for sev in severity_counts.index]
+                )
+                st.plotly_chart(fig_severity, use_container_width=True)
+            
+            # Issues over Time
+            st.subheader("Issues Over Time")
+            df_time = df_issues.set_index('created_at')
+            daily_issues = df_time.resample('D').size()
+            
+            st.plotly_chart(
+                px.line(
+                    daily_issues,
+                    title="Daily Issue Trends",
+                    labels={'value': 'Number of Issues', 'created_at': 'Date'}
+                ),
+                use_container_width=True
+            )
+            
+            # Category Distribution
+            st.subheader("Category Analysis")
+            col3, col4 = st.columns(2)
+            
+            with col3:
+                category_counts = df_issues['category'].value_counts()
+                st.plotly_chart(
+                    px.pie(
+                        values=category_counts.values,
+                        names=category_counts.index,
+                        title="Issues by Category"
+                    ),
+                    use_container_width=True
+                )
+                
+            with col4:
+                # Severity by Category with custom colors
+                severity_by_category = pd.crosstab(df_issues['category'], df_issues['severity'])
+                fig_severity_cat = px.bar(
+                    severity_by_category,
+                    title="Severity Distribution by Category",
+                    barmode='group',
+                    labels={'value': 'Count', 'category': 'Category'}
+                )
+                
+                # Update colors for each severity level
+                for i, severity in enumerate(severity_by_category.columns):
+                    fig_severity_cat.data[i].marker.color = severity_colors.get(severity, '#808080')
+                    
+                st.plotly_chart(fig_severity_cat, use_container_width=True)
+            
+            # Status Timeline with severity colors
+            st.subheader("Status Timeline")
+            severity_timeline = df_issues.pivot_table(
+                index='created_at',
+                columns='severity',
+                aggfunc='size',
+                fill_value=0
+            ).resample('W').sum()
+            
+            fig_timeline = px.area(
+                severity_timeline,
+                title="Severity Trends Over Time",
+                labels={'value': 'Number of Issues', 'created_at': 'Date'}
+            )
+            
+            # Update area colors
+            for i, severity in enumerate(severity_timeline.columns):
+                fig_timeline.data[i].fillcolor = severity_colors.get(severity, '#808080')
+                fig_timeline.data[i].line.color = severity_colors.get(severity, '#808080')
+                
+            st.plotly_chart(fig_timeline, use_container_width=True)
+        
+        with tab2:
+            st.subheader("Pathway Management Overview")
+            st.write(f"Total Pathways: {len(df_pathways)}")
+            st.dataframe(df_pathways)
+        
+        with tab3:
+            st.subheader("Control Guidance Overview")
+            st.write(f"Total Guidance Documents: {len(df_guidance)}")
+            st.dataframe(df_guidance)
+        
+    except Exception as e:
+        st.error(f"Error generating visualizations: {str(e)}")
+    
+    finally:
+        conn.close()
+
+def pathway_management_visualization():
+    st.title("Pathway Management Analytics")
+    
+    conn = get_db_connection()
+    if not conn:
+        st.error("Could not connect to database")
+        return
+    
+    try:
+        df_pathways = pd.read_sql_query("SELECT * FROM pathways", conn)
+        
+        if df_pathways.empty:
+            st.info("No pathways found in the database")
+            return
+        
+        # Display total pathways
+        st.metric("Total Pathways", len(df_pathways))
+        
+        # Example visualization: Pathways by Description Length
+        df_pathways['description_length'] = df_pathways['description'].apply(len)
+        st.plotly_chart(
+            px.histogram(
+                df_pathways,
+                x='description_length',
+                nbins=20,
+                title="Distribution of Pathway Description Lengths",
+                labels={'description_length': 'Description Length'}
+            ),
+            use_container_width=True
+        )
+        
+    except Exception as e:
+        st.error(f"Error generating pathway visualizations: {str(e)}")
+    
+    finally:
+        conn.close()
+
+def control_guidance_visualization():
+    st.title("Control Guidance Analytics")
+    
+    conn = get_db_connection()
+    if not conn:
+        st.error("Could not connect to database")
+        return
+    
+    try:
+        df_guidance = pd.read_sql_query("SELECT * FROM guidance", conn)
+        
+        if df_guidance.empty:
+            st.info("No guidance documents found in the database")
+            return
+        
+        # Display total guidance documents
+        st.metric("Total Guidance Documents", len(df_guidance))
+        
+        # Example visualization: Guidance by Category
+        category_counts = df_guidance['category'].value_counts()
+        st.plotly_chart(
+            px.pie(
+                values=category_counts.values,
+                names=category_counts.index,
+                title="Guidance Distribution by Category"
+            ),
+            use_container_width=True
+        )
+        
+    except Exception as e:
+        st.error(f"Error generating guidance visualizations: {str(e)}")
+    
+    finally:
+        conn.close()
+
+def get_db_connection():
+    """Establish a connection to the SQLite database."""
+    try:
+        conn = sqlite3.connect('data.db')
+        return conn
+    except sqlite3.Error as e:
+        st.error(f"Error connecting to database: {str(e)}")
+        return None
+
 def main():
     # Initialize session state for navigation if it doesn't exist
     if 'page' not in st.session_state:
@@ -1280,6 +1514,15 @@ def main():
     st.sidebar.header("Issue Management")
     if st.sidebar.button("Issue Management", key="sidebar_issue_mgmt_1"):
         st.session_state.page = "Issue Management"
+    
+    # Analytics Section
+    st.sidebar.header("Analytics")
+    if st.sidebar.button("Issue Analytics", key="sidebar_analytics"):
+        st.session_state.page = "Issue Analytics"
+    if st.sidebar.button("Pathway Management Analytics", key="sidebar_pathway_mgmt_analytics"):
+        st.session_state.page = "Pathway Management Analytics"
+    if st.sidebar.button("Control Guidance Analytics", key="sidebar_control_guidance_analytics"):
+        st.session_state.page = "Control Guidance Analytics"
     
     # Initialize database
     init_db()
@@ -1350,237 +1593,22 @@ def main():
                 st.code(str(e))
     
     elif st.session_state.page == "Control Guidance":
-        guidance_management_page()
+        guidance_management_page()  # Function to manage control guidance
     
     elif st.session_state.page == "Issue Management":
         issue_management_page()
     
-    else:  # Pathway Management
-        pathway_management_page()
-
-def find_control_column(df):
-    """Attempt to automatically detect the control description column"""
-    possible_names = [
-        'control', 'description', 'control_description', 'control description',
-        'control_details', 'control details', 'requirement', 'control_requirement',
-        'control requirement', 'security_control', 'security control'
-    ]
+    elif st.session_state.page == "Issue Analytics":
+        visualization_page()
     
-    # Check for exact matches (case-insensitive)
-    for col in df.columns:
-        if col.lower() in possible_names:
-            return col
-            
-    # Check for partial matches
-    for col in df.columns:
-        for name in possible_names:
-            if name in col.lower():
-                return col
+    elif st.session_state.page == "Pathway Management":
+        pathway_management_page()  # Function to manage pathways
     
-    return None
-
-def issue_management_page():
-    st.title("Issue Management")
+    elif st.session_state.page == "Pathway Management Analytics":
+        pathway_management_visualization()
     
-    # Initialize session state for real-time search
-    if "search_text" not in st.session_state:
-        st.session_state.search_text = ""
-    if "search_desc" not in st.session_state:
-        st.session_state.search_desc = ""
-
-    def on_text_change():
-        st.session_state.search_text = st.session_state.title_input
-        st.session_state.search_desc = st.session_state.desc_input
-    
-    tab1, tab2, tab3 = st.tabs(["View Issues", "Add Issue", "Bulk Upload"])
-    
-    with tab1:
-        st.header("View Issues")
-        # Add search box
-        search_query = st.text_input("Search issues:", key="search_issues")
-        
-        conn = get_db_connection()
-        if conn:
-            cursor = conn.cursor()
-            if search_query:
-                # Use semantic search when query is provided
-                cursor.execute("""
-                    SELECT id, title, description, category, status, severity, created_at 
-                    FROM issues 
-                    WHERE title LIKE ? OR description LIKE ?
-                    ORDER BY created_at DESC
-                """, (f"%{search_query}%", f"%{search_query}%"))
-            else:
-                # Show all issues when no search query
-                cursor.execute("""
-                    SELECT id, title, description, category, status, severity, created_at 
-                    FROM issues
-                    ORDER BY created_at DESC
-                """)
-            
-            issues = cursor.fetchall()
-            
-            # Display total count
-            total_issues = len(issues)
-            if search_query:
-                st.write(f"Found {total_issues} issue{'s' if total_issues != 1 else ''} matching '{search_query}'")
-            else:
-                st.write(f"Total issues: {total_issues}")
-            
-            if issues:
-                for issue in issues:
-                    with st.expander(f"{issue[1]} - {issue[4]}"):
-                        st.write(f"**Description:** {issue[2]}")
-                        st.write(f"**Category:** {issue[3]}")
-                        st.write(f"**Severity:** {issue[5]}")
-                        st.write(f"**Created:** {issue[6]}")
-            else:
-                st.info("No issues found")
-            
-            conn.close()
-    
-    with tab2:
-        st.header("Add New Issue")
-        title = st.text_input("Title", key="title_input", on_change=on_text_change)
-        description = st.text_area("Description", key="desc_input", on_change=on_text_change)
-        
-        # Show similar issues while typing
-        if st.session_state.search_text or st.session_state.search_desc:
-            conn = get_db_connection()
-            if conn:
-                cursor = conn.cursor()
-                # Search for similar issues based on title or description
-                cursor.execute("""
-                    SELECT title, description, category, severity, status 
-                    FROM issues 
-                    WHERE title LIKE ? OR description LIKE ?
-                    LIMIT 5
-                """, (f"%{st.session_state.search_text}%", f"%{st.session_state.search_desc}%"))
-                
-                similar_issues = cursor.fetchall()
-                if similar_issues:
-                    st.warning("⚠️ Similar existing issues found:")
-                    for issue in similar_issues:
-                        with st.expander(f"Similar: {issue[0]}"):
-                            st.write(f"**Description:** {issue[1]}")
-                            st.write(f"**Category:** {issue[2]}")
-                            st.write(f"**Severity:** {issue[3]}")
-                            st.write(f"**Status:** {issue[4]}")
-                conn.close()
-        
-        # Continue with the rest of the form
-        category = st.selectbox("Category", ["Technical", "Process", "People", "Other"])
-        severity = st.selectbox("Severity", ["Low", "Medium", "High", "Critical"])
-        status = st.selectbox("Status", ["Open", "In Progress", "Resolved", "Closed"])
-        
-        if st.button("Add Issue"):
-            if title and description:
-                conn = get_db_connection()
-                if conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO issues (title, description, category, severity, status)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (title, description, category, severity, status))
-                    conn.commit()
-                    conn.close()
-                    st.success("Issue added successfully!")
-                    st.rerun()
-            else:
-                st.error("Title and description are required")
-    
-    with tab3:
-        st.header("Bulk Upload Issues")
-        uploaded_file = st.file_uploader("Upload Excel or CSV file", type=['xlsx', 'csv'])
-        
-        if uploaded_file is not None:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file)
-                
-                # Convert column names to lowercase for case-insensitive comparison
-                df.columns = df.columns.str.lower().str.strip()
-                
-                st.subheader("Preview of uploaded data")
-                st.dataframe(df.head())
-                
-                # Define required columns and their possible variations
-                required_columns_mapping = {
-                    'title': ['title', 'issue title', 'name', 'issue name'],
-                    'description': ['description', 'desc', 'issue description', 'details'],
-                    'category': ['category', 'type', 'issue type', 'issue category'],
-                    'severity': ['severity', 'priority', 'impact', 'severity level'],
-                    'status': ['status', 'state', 'issue status']
-                }
-                
-                # Check for missing columns with variations
-                missing_columns = []
-                column_mapping = {}  # Store the actual column names to use
-                
-                for req_col, variations in required_columns_mapping.items():
-                    found = False
-                    for var in variations:
-                        if var in df.columns:
-                            column_mapping[req_col] = var
-                            found = True
-                            break
-                    if not found:
-                        missing_columns.append(req_col)
-                
-                if missing_columns:
-                    st.error(f"Missing required columns: {', '.join(missing_columns)}")
-                    st.info("Your file should contain these columns (or variations):")
-                    for col, variations in required_columns_mapping.items():
-                        st.write(f"- {col}: {', '.join(variations)}")
-                else:
-                    if st.button("Upload Issues"):
-                        conn = get_db_connection()
-                        if conn:
-                            cursor = conn.cursor()
-                            success_count = 0
-                            error_count = 0
-                            
-                            for _, row in df.iterrows():
-                                try:
-                                    cursor.execute("""
-                                        INSERT INTO issues (title, description, category, severity, status)
-                                        VALUES (?, ?, ?, ?, ?)
-                                    """, (
-                                        row[column_mapping['title']],
-                                        row[column_mapping['description']],
-                                        row[column_mapping['category']],
-                                        row[column_mapping['severity']],
-                                        row[column_mapping['status']]
-                                    ))
-                                    success_count += 1
-                                except Exception as e:
-                                    error_count += 1
-                                    st.error(f"Error inserting row: {str(e)}")
-                            
-                            conn.commit()
-                            conn.close()
-                            
-                            st.success(f"Successfully uploaded {success_count} issues")
-                            if error_count > 0:
-                                st.warning(f"Failed to upload {error_count} issues")
-                            
-                            st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error processing file: {str(e)}")
-
-def get_db_connection():
-    """Get a connection to the SQLite database"""
-    try:
-        conn = sqlite3.connect('data.db')
-        # Enable foreign key support
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
-    except Exception as e:
-        st.error(f"Error connecting to database: {str(e)}")
-        return None
+    elif st.session_state.page == "Control Guidance Analytics":
+        control_guidance_visualization()
 
 if __name__ == "__main__":
     main()
