@@ -12,6 +12,10 @@ import re
 from io import StringIO
 import json
 import plotly.express as px
+from datetime import datetime
+import uuid
+from agents import expert_agents, aggregator_agent, run_all_agents, aggregate_responses
+from graph_rag import GraphRAG
 
 # Load environment variables from .env file
 load_dotenv()
@@ -62,7 +66,67 @@ def init_db():
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         conn.commit()
     
-    conn.close()
+    # Initialize risks table
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS risks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                category TEXT,
+                likelihood TEXT,
+                impact TEXT,
+                inherent_risk_score REAL,
+                residual_risk_score REAL,
+                status TEXT,
+                owner TEXT,
+                review_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Initialize controls table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS controls (
+                id TEXT PRIMARY KEY,
+                risk_id TEXT,
+                name TEXT NOT NULL,
+                description TEXT,
+                type TEXT,
+                effectiveness TEXT,
+                status TEXT,
+                owner TEXT,
+                implementation_date DATE,
+                last_review_date DATE,
+                next_review_date DATE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (risk_id) REFERENCES risks (id)
+            )
+        """)
+        
+        # Initialize risk_assessments table
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS risk_assessments (
+                id TEXT PRIMARY KEY,
+                risk_id TEXT,
+                assessment_date DATE,
+                assessor TEXT,
+                likelihood TEXT,
+                impact TEXT,
+                risk_score REAL,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (risk_id) REFERENCES risks (id)
+            )
+        """)
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+    finally:
+        conn.close()
 
 def save_pathway(pathway, description):
     conn = sqlite3.connect('data.db')
@@ -1483,6 +1547,189 @@ def get_db_connection():
         st.error(f"Error connecting to database: {str(e)}")
         return None
 
+def save_risk(risk_data):
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    
+    try:
+        if 'id' not in risk_data:
+            risk_data['id'] = str(uuid.uuid4())
+        
+        c.execute("""
+            INSERT OR REPLACE INTO risks (
+                id, name, description, category, likelihood, impact,
+                inherent_risk_score, residual_risk_score, status, owner,
+                review_date, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            risk_data['id'],
+            risk_data['name'],
+            risk_data.get('description', ''),
+            risk_data.get('category', ''),
+            risk_data.get('likelihood', ''),
+            risk_data.get('impact', ''),
+            risk_data.get('inherent_risk_score', 0.0),
+            risk_data.get('residual_risk_score', 0.0),
+            risk_data.get('status', 'Open'),
+            risk_data.get('owner', ''),
+            risk_data.get('review_date', None),
+            datetime.now()
+        ))
+        conn.commit()
+        return risk_data['id']
+    except sqlite3.Error as e:
+        st.error(f"Error saving risk: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_risks():
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    
+    try:
+        c.execute("SELECT * FROM risks ORDER BY created_at DESC")
+        columns = [description[0] for description in c.description]
+        risks = [dict(zip(columns, row)) for row in c.fetchall()]
+        return risks
+    except sqlite3.Error as e:
+        st.error(f"Error fetching risks: {e}")
+        return []
+    finally:
+        conn.close()
+
+def delete_risk(risk_id):
+    conn = sqlite3.connect('data.db')
+    c = conn.cursor()
+    
+    try:
+        # Delete associated controls and assessments first
+        c.execute("DELETE FROM controls WHERE risk_id = ?", (risk_id,))
+        c.execute("DELETE FROM risk_assessments WHERE risk_id = ?", (risk_id,))
+        c.execute("DELETE FROM risks WHERE id = ?", (risk_id,))
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        st.error(f"Error deleting risk: {e}")
+        return False
+    finally:
+        conn.close()
+
+def risk_management_page():
+    st.title("Risk Management")
+    
+    # Sidebar for API Key
+    if "decrypted_api_key" not in st.session_state:
+        st.sidebar.text_input("Enter Groq API Key", type="password", key="api_key_input", 
+                            on_change=lambda: st.session_state.update({"decrypted_api_key": st.session_state.api_key_input}))
+    
+    # Create tabs for different functionalities
+    tab1, tab2, tab3 = st.tabs(["Risk Analysis", "Document Analysis", "Risk Visualization"])
+    
+    with tab1:
+        st.subheader("Risk Analysis")
+        query = st.text_area("Enter your risk-related query:", height=100,
+                            help="Ask about cybersecurity risks, compliance, or technology risk management.")
+        
+        if st.button("Analyze Risk"):
+            if not query:
+                st.warning("Please enter a query.")
+                return
+                
+            with st.spinner("Analyzing with multiple expert agents..."):
+                # Initialize conversation history if not exists
+                if "conversation_history" not in st.session_state:
+                    st.session_state.conversation_history = []
+                
+                # Get responses from all expert agents
+                agent_responses = run_all_agents(
+                    query, 
+                    st.session_state.conversation_history,
+                    []  # Empty document references for now
+                )
+                
+                # Display individual expert responses in an expander
+                with st.expander("View Individual Expert Analyses"):
+                    for agent_name, response in agent_responses.items():
+                        st.markdown(f"**{agent_name}**")
+                        st.markdown(response)
+                        st.divider()
+                
+                # Get aggregated response
+                aggregated_response = aggregate_responses(
+                    query,
+                    agent_responses,
+                    st.session_state.conversation_history,
+                    []  # Empty document references for now
+                )
+                
+                # Display aggregated response
+                st.markdown("### Aggregated Analysis")
+                st.markdown(aggregated_response)
+                
+                # Update conversation history
+                st.session_state.conversation_history.extend([
+                    {"role": "user", "content": query},
+                    {"role": "assistant", "content": aggregated_response}
+                ])
+    
+    with tab2:
+        st.subheader("Document Analysis")
+        uploaded_files = st.file_uploader(
+            "Upload documents for analysis (PDF, TXT, DOCX)", 
+            accept_multiple_files=True,
+            type=['pdf', 'txt', 'docx']
+        )
+        
+        if uploaded_files:
+            documents = []
+            for file in uploaded_files:
+                try:
+                    # For simplicity, reading as text. You might want to add proper PDF/DOCX handling
+                    content = file.read().decode('utf-8')
+                    documents.append(content)
+                except Exception as e:
+                    st.error(f"Error reading file {file.name}: {str(e)}")
+            
+            if documents:
+                # Initialize GraphRAG with uploaded documents
+                rag = GraphRAG(documents)
+                
+                # Document query interface
+                doc_query = st.text_input("Ask a question about your documents:")
+                if doc_query:
+                    with st.spinner("Searching documents..."):
+                        response = rag.query(doc_query)
+                        st.markdown(response)
+    
+    with tab3:
+        st.subheader("Risk Visualization")
+        if "conversation_history" in st.session_state and st.session_state.conversation_history:
+            # Extract risk-related information from conversation history
+            risk_docs = [
+                msg["content"] 
+                for msg in st.session_state.conversation_history 
+                if msg["role"] == "assistant"
+            ]
+            
+            if risk_docs:
+                # Create graph visualization
+                rag = GraphRAG(risk_docs)
+                rag._add_edges()  # Add relationships between documents
+                
+                # Display the graph
+                st.pyplot(rag.visualize_graph())
+                
+                # Add some metrics
+                st.markdown("### Risk Analysis Metrics")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Total Risk Analyses", len(risk_docs))
+                with col2:
+                    st.metric("Connected Insights", len(list(rag.graph.edges())))
+        else:
+            st.info("No risk analysis history available for visualization. Start by analyzing some risks in the Risk Analysis tab.")
+
 def main():
     # Initialize session state for navigation if it doesn't exist
     if 'page' not in st.session_state:
@@ -1523,6 +1770,15 @@ def main():
         st.session_state.page = "Pathway Management Analytics"
     if st.sidebar.button("Control Guidance Analytics", key="sidebar_control_guidance_analytics"):
         st.session_state.page = "Control Guidance Analytics"
+    
+    # Add Risk Management button in sidebar
+    st.sidebar.header("Risk Management")
+    if st.sidebar.button("Risk Management", key="risk_mgmt"):
+        st.session_state.page = "Risk Management"
+    
+    # Add to your page routing
+    if st.session_state.page == "Risk Management":
+        risk_management_page()
     
     # Initialize database
     init_db()
