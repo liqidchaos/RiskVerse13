@@ -158,25 +158,59 @@ def delete_pathway(pathway):
     conn.close()
 
 def classify_issue(client, issue_description, pathways):
-    # Update prompt to include descriptions
-    prompt = "Analyze the following technology issue and classify it into one of these specific risk pathways:\n\n"
-    for pathway, description in pathways:
-        prompt += f"{pathway}:\n{description}\n\n"
+    # Extract valid pathways and their descriptions
+    valid_pathways = [p[0] for p in pathways]
+    pathway_descriptions = {p[0]: p[1] for p in pathways}
     
-    prompt += f"Issue: {issue_description}\n\nSelect the most appropriate pathway from the list above. Response should be exactly one of the pathway names (without description):"
+    # Create a focused prompt that encourages selection based only on the issue description
+    prompt = f"""Given the following issue, identify the pathway that best represents the primary means or threat vector creating the impact.
+
+Issue Description: {issue_description}
+
+Available Pathways:
+{chr(10).join(f'- {p}: {pathway_descriptions[p]}' for p in valid_pathways)}
+
+Instructions: Evaluate the issue based solely on its description and choose ONLY the name of the most appropriate pathway from the list. Do not provide any additional explanations—return only the pathway name.
+
+Selected pathway:"""
     
     try:
+        # Request the model response
         response = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
+            messages=[{
+                "role": "user", 
+                "content": prompt
+            }],
             model="llama-3.2-11b-vision-preview",
-            temperature=0.1,
-            max_tokens=100
+            temperature=0,  # Consistent responses
+            max_tokens=30   # Limit to only pathway name
         )
         
-        return response.choices[0].message.content.strip()
+        # Extract the content and clean it to ensure only the pathway name remains
+        result = response.choices[0].message.content.strip()
+        result = result.replace('"', '').replace("'", "").strip()
+        
+        # Direct match check: Ensure the response is valid by matching with pathways
+        if result in valid_pathways:
+            return result
+        
+        # Case-insensitive matching to handle minor variations
+        result_lower = result.lower()
+        for pathway in valid_pathways:
+            if pathway.lower() == result_lower:
+                return pathway
+            elif pathway.lower() in result_lower:
+                return pathway
+        
+        # If no valid pathway is returned by the model, label as "Uncategorized" or as the original response
+        return result if result in valid_pathways else "Uncategorized"
         
     except Exception as e:
-        st.error(f"Error in classification: {str(e)}")
+        print(f"Classification error: {str(e)}")
+        return "Classification Error"
+        
+    except Exception as e:
+        st.error(f"Classification error: {str(e)}")
         return "Classification Error"
 
 def find_issue_column(df):
@@ -267,175 +301,100 @@ def read_file(file):
 
 def process_file(file, api_key):
     client = Groq(api_key=api_key)
+    
+    # Get pathways from database
     pathways = get_pathways()
-    
     if not pathways:
-        st.error("Please add some pathways in the Pathway Management page first!")
+        st.error("No pathways found! Please add pathways in the Pathway Management page first.")
         return None
+        
+    st.write(f"Found {len(pathways)} pathways for classification:")
+    for pathway, desc in pathways:
+        st.write(f"- {pathway}")
     
-    # Initialize session state for tracking revisions if not exists
-    if 'current_df' not in st.session_state:
-        st.session_state.current_df = None
-        st.session_state.revision_count = 0
-    
-    # Initial processing
-    if st.session_state.current_df is None:
-        try:
-            # Read and preprocess the file
-            df = read_file(file)
-            if df is None:
-                return None
-                
-            # Display column preview
-            st.write("Preview of detected columns:")
-            st.dataframe(df.head(2))
-            
-            # Try to automatically detect issue column
-            issue_column = find_issue_column(df)
-            
-            # If can't automatically detect, let user select
-            if issue_column is None:
-                st.warning("Could not automatically detect the issue description column. Please select it manually:")
-                issue_column = st.selectbox("Select the column containing issue descriptions:", df.columns)
-            else:
-                st.success(f"Automatically detected issue description column: {issue_column}")
-                # Allow user to override if needed
-                if st.checkbox("Use a different column?"):
-                    issue_column = st.selectbox("Select the column containing issue descriptions:", df.columns)
-            
-            # Add columns for pathways, suggestions, and rationale
-            df['Risk_Pathway'] = ''
-            df['Suggested_Pathway'] = ''
-            df['Model_Rationale'] = ''
-            
-            # First pass: AI classification
-            with st.progress(0):
-                for idx, row in df.iterrows():
-                    pathway = classify_issue(client, str(row[issue_column]), pathways)
-                    df.at[idx, 'Risk_Pathway'] = pathway
-                    st.progress((idx + 1) / len(df))
-            
-            st.session_state.current_df = df
-            st.session_state.issue_column = issue_column
-            
-        except Exception as e:
-            st.error(f"An error occurred: {str(e)}")
+    # Process the file
+    try:
+        df = read_file(file)
+        if df is None:
             return None
-
-    # Display current state
-    st.write(f"Revision Round: {st.session_state.revision_count + 1}")
-    
-    # Create column configuration for data editor
-    column_config = {
-        'Suggested_Pathway': st.column_config.SelectboxColumn(
-            'Suggested_Pathway',
-            help='Select an alternative pathway if needed',
-            width='medium',
-            options=[p[0] for p in pathways],
-            required=False
-        ),
-        'Model_Rationale': st.column_config.TextColumn(
-            'Model_Rationale',
-            help='AI explanation for classification',
-            width='large',
-        )
-    }
-    
-    # Display editable dataframe
-    edited_df = st.data_editor(
-        st.session_state.current_df,
-        disabled=["Risk_Pathway", "Model_Rationale", st.session_state.issue_column],
-        column_config=column_config,
-        hide_index=True,
-    )
-
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.button("Reprocess with Suggestions"):
-            with st.spinner("Reprocessing with user feedback..."):
-                try:
-                    for idx, row in edited_df.iterrows():
-                        suggestion = row['Suggested_Pathway']
-                        if suggestion and suggestion.strip():
-                            prompt = f"""Reconsider this classification:
-                            Issue: {row[st.session_state.issue_column]}
-                            Initial classification: {row['Risk_Pathway']}
-                            User suggested: {suggestion}
-                            
-                            Provide your final classification and detailed rationale in this format:
-                            Classification: [chosen pathway]
-                            Rationale: [detailed explanation considering both the initial classification and user suggestion]
-                            """
-                            
-                            response = client.chat.completions.create(
-                                messages=[{"role": "user", "content": prompt}],
-                                model="llama-3.2-11b-vision-preview",
-                                temperature=0.1,
-                                max_tokens=300
-                            )
-                            
-                            result = response.choices[0].message.content.strip()
-                            
-                            if 'Classification:' in result and 'Rationale:' in result:
-                                classification = result.split('Classification:')[1].split('Rationale:')[0].strip()
-                                rationale = result.split('Rationale:')[1].strip()
-                            else:
-                                classification = result
-                                rationale = "Response format was unexpected"
-                            
-                            edited_df.at[idx, 'Risk_Pathway'] = classification
-                            edited_df.at[idx, 'Model_Rationale'] = rationale
-                    
-                    st.session_state.current_df = edited_df
-                    st.session_state.revision_count += 1
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"Error during reprocessing: {str(e)}")
-    
-    with col2:
-        if st.button("Finalize Classifications"):
-            # Create final output
-            final_df = st.session_state.current_df.copy()
             
-            # Clean up the dataframe
-            final_df = final_df.drop('Suggested_Pathway', axis=1)
+        # Find issue column
+        issue_column = find_issue_column(df)
+        if issue_column is None:
+            st.warning("Could not automatically detect issue column")
+            issue_column = st.selectbox("Select issue column:", df.columns)
+        
+        # Add classification columns
+        df['Risk_Pathway'] = ''
+        
+        # Process issues
+        total = len(df)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for idx, row in df.iterrows():
+            status_text.write(f"Processing issue {idx + 1} of {total}")
+            issue_text = str(row[issue_column])
             
-            # Reset session state
-            st.session_state.current_df = None
-            st.session_state.revision_count = 0
+            # Classify the issue
+            pathway = classify_issue(client, issue_text, pathways)
+            df.at[idx, 'Risk_Pathway'] = pathway
             
-            return final_df
-    
-    return None
+            # Update progress
+            progress_bar.progress((idx + 1) / total)
+        
+        status_text.empty()
+        progress_bar.empty()
+        
+        # Show results summary
+        pathway_counts = df['Risk_Pathway'].value_counts()
+        st.write("Classification Results:")
+        st.write(pathway_counts)
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error processing file: {str(e)}")
+        return None
 
 def pathway_management_page():
     st.title("Pathway Management")
     
     # Add multiple pathways
-    st.write("Enter pathways and descriptions (in the format 'Pathway Name:\\n\\nDescription: description text')")
+    st.write("""Enter pathways and descriptions (one per line). Format:
+    
+    Pathway Name: Description text
+    Another Pathway: Its description text
+    """)
     new_pathways = st.text_area("Enter pathways:", height=300)
     
     if st.button("Add Pathways"):
         if new_pathways:
-            # Split by double newline to separate different pathways
-            pathway_blocks = [block.strip() for block in new_pathways.split('\n\n') if block.strip()]
+            # Split by newlines and process each line
+            pathway_entries = [entry.strip() for entry in new_pathways.split('\n') if entry.strip()]
             
-            for block in pathway_blocks:
-                if ':' in block:
-                    # Split the first line (pathway name) from description
-                    lines = block.split('\n', 1)
-                    pathway = lines[0].replace(':', '').strip()
+            added_count = 0
+            for entry in pathway_entries:
+                # Check if entry contains a colon (separator between name and description)
+                if ':' in entry:
+                    # Split at first colon to separate pathway name and description
+                    parts = entry.split(':', 1)
                     
-                    # Extract description if it exists
-                    description = ''
-                    if len(lines) > 1 and 'Description:' in lines[1]:
-                        description = lines[1].replace('Description:', '').strip()
+                    # Clean up pathway name and description
+                    pathway = parts[0].strip()
+                    # Remove any numbering at the start (e.g., "3." or "4.")
+                    pathway = re.sub(r'^\d+\.\s*', '', pathway)
                     
-                    save_pathway(pathway, description)
+                    description = parts[1].strip() if len(parts) > 1 else ''
+                    
+                    if pathway:  # Only save if pathway name exists
+                        save_pathway(pathway, description)
+                        added_count += 1
             
-            st.success(f"Added {len(pathway_blocks)} pathways")
+            if added_count > 0:
+                st.success(f"Added {added_count} pathways")
+            else:
+                st.warning("No valid pathways found to add")
         else:
             st.error("Please enter at least one pathway")
     
