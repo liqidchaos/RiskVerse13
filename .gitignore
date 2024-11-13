@@ -12,4 +12,8 @@ etc/
 lib/
 share/
 
+.env
+
+.gitignore
+
 

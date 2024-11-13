@@ -1618,6 +1618,15 @@ def delete_risk(risk_id):
 def risk_management_page():
     st.title("Risk Management")
     
+    # Update only this part to get API key from .env
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        st.error("GROQ API key not found in .env file. Please make sure you have set GROQ_API_KEY in your .env file.")
+        return
+        
+    # Initialize Groq client with env variable
+    client = Groq(api_key=groq_api_key)
+    
     # Sidebar for API Key
     if "decrypted_api_key" not in st.session_state:
         st.sidebar.text_input("Enter Groq API Key", type="password", key="api_key_input", 
@@ -1729,6 +1738,236 @@ def risk_management_page():
                     st.metric("Connected Insights", len(list(rag.graph.edges())))
         else:
             st.info("No risk analysis history available for visualization. Start by analyzing some risks in the Risk Analysis tab.")
+
+def issue_management_page():
+    st.title("Issue Management")
+    
+    # Get API key from environment variable
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        st.error("GROQ API key not found in .env file. Please make sure you have set GROQ_API_KEY in your .env file.")
+        return
+        
+    # Initialize Groq client
+    client = Groq(api_key=groq_api_key)
+    
+    # Create tabs for different functionalities
+    tab1, tab2, tab3 = st.tabs(["View Issues", "Add Issues", "Search Issues"])
+    
+    # Tab 1: View Existing Issues
+    with tab1:
+        st.subheader("Existing Issues")
+        
+        # Read issues from database
+        conn = sqlite3.connect('data.db')
+        df_issues = pd.read_sql_query("""
+            SELECT id, title, description, category, severity, status, created_at 
+            FROM issues ORDER BY created_at DESC
+        """, conn)
+        conn.close()
+        
+        if not df_issues.empty:
+            # Add filters
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                status_filter = st.multiselect(
+                    "Filter by Status",
+                    options=df_issues['status'].unique()
+                )
+            with col2:
+                severity_filter = st.multiselect(
+                    "Filter by Severity",
+                    options=df_issues['severity'].unique()
+                )
+            with col3:
+                category_filter = st.multiselect(
+                    "Filter by Category",
+                    options=df_issues['category'].unique()
+                )
+            
+            # Apply filters
+            filtered_df = df_issues.copy()
+            if status_filter:
+                filtered_df = filtered_df[filtered_df['status'].isin(status_filter)]
+            if severity_filter:
+                filtered_df = filtered_df[filtered_df['severity'].isin(severity_filter)]
+            if category_filter:
+                filtered_df = filtered_df[filtered_df['category'].isin(category_filter)]
+            
+            # Display filtered issues
+            st.dataframe(
+                filtered_df,
+                hide_index=True,
+                column_config={
+                    "created_at": st.column_config.DatetimeColumn("Created At", format="D MMM YYYY, HH:mm"),
+                }
+            )
+        else:
+            st.info("No issues found in the database")
+    
+    # Tab 2: Add New Issues
+    with tab2:
+        st.subheader("Add New Issues")
+        
+        input_method = st.radio(
+            "Choose input method:",
+            ["Single Issue", "Bulk Upload"]
+        )
+        
+        if input_method == "Single Issue":
+            with st.form("new_issue_form"):
+                title = st.text_input("Issue Title")
+                description = st.text_area("Issue Description")
+                category = st.selectbox(
+                    "Category",
+                    ["Technical", "Process", "Security", "Performance", "Other"]
+                )
+                severity = st.select_slider(
+                    "Severity",
+                    options=["Low", "Medium", "High", "Critical"]
+                )
+                status = st.selectbox(
+                    "Status",
+                    ["Open", "In Progress", "Under Review", "Resolved", "Closed"]
+                )
+                
+                if st.form_submit_button("Add Issue"):
+                    if title and description:
+                        conn = sqlite3.connect('data.db')
+                        c = conn.cursor()
+                        c.execute("""
+                            INSERT INTO issues (title, description, category, severity, status)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (title, description, category, severity, status))
+                        conn.commit()
+                        conn.close()
+                        st.success("Issue added successfully!")
+                    else:
+                        st.error("Title and description are required")
+        
+        else:  # Bulk Upload
+            uploaded_file = st.file_uploader(
+                "Upload CSV or Excel file", 
+                type=['csv', 'xlsx'],
+                key="bulk_issue_upload"
+            )
+            
+            if uploaded_file is not None:
+                try:
+                    if uploaded_file.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded_file)
+                    else:
+                        df = pd.read_excel(uploaded_file)
+                    
+                    st.write("Preview of uploaded data:")
+                    st.dataframe(df.head())
+                    
+                    if st.button("Process and Add Issues"):
+                        conn = sqlite3.connect('data.db')
+                        df.to_sql('issues', conn, if_exists='append', index=False)
+                        conn.close()
+                        st.success(f"Successfully added {len(df)} issues to the database!")
+                except Exception as e:
+                    st.error(f"Error processing file: {str(e)}")
+    
+    # Tab 3: Semantic Search
+    with tab3:
+        st.subheader("Search Issues")
+        
+        search_query = st.text_input("Enter your search query")
+        
+        if search_query:
+            with st.spinner("Searching..."):
+                # Get all issues from database
+                conn = sqlite3.connect('data.db')
+                df_issues = pd.read_sql_query("""
+                    SELECT id, title, description, category, severity, status, created_at 
+                    FROM issues
+                """, conn)
+                conn.close()
+                
+                # Prepare a simplified version of issues for the prompt
+                simplified_issues = df_issues.apply(
+                    lambda x: {
+                        'id': x['id'],
+                        'title': x['title'],
+                        'description': x['description'][:200] if x['description'] else ''  # Limit description length
+                    }, 
+                    axis=1
+                ).tolist()
+                
+                # Create search prompt
+                search_prompt = f"""
+                Search Query: {search_query}
+                
+                Find relevant issues from the list below. For each matching issue:
+                1. Assign a relevance score (0-100)
+                2. Briefly explain why it matches (max 50 words)
+                
+                Return JSON format:
+                {{
+                    "total_matches": number,
+                    "matches": [
+                        {{
+                            "issue_id": id,
+                            "relevance_score": number,
+                            "explanation": "text"
+                        }}
+                    ]
+                }}
+                
+                Issues:
+                {json.dumps(simplified_issues[:20])}  # Limit to top 20 most recent issues
+                """
+                
+                try:
+                    response = client.chat.completions.create(
+                        messages=[{"role": "user", "content": search_prompt}],
+                        model="llama-3.2-90b-vision-preview",
+                        temperature=0.1,
+                        max_tokens=1000
+                    )
+                    
+                    # Parse the response
+                    try:
+                        results = json.loads(response.choices[0].message.content)
+                        
+                        # Display summary
+                        st.metric("Matching Issues Found", results["total_matches"])
+                        
+                        # Sort matches by relevance score
+                        results["matches"].sort(key=lambda x: x["relevance_score"], reverse=True)
+                        
+                        # Display each matching issue
+                        for match in results["matches"]:
+                            issue_id = match["issue_id"]
+                            issue_data = df_issues[df_issues['id'] == issue_id].iloc[0]
+                            
+                            with st.expander(f"Issue: {issue_data['title']} (Relevance: {match['relevance_score']}%)"):
+                                # Issue details
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.markdown(f"**Category:** {issue_data['category']}")
+                                with col2:
+                                    st.markdown(f"**Severity:** {issue_data['severity']}")
+                                with col3:
+                                    st.markdown(f"**Status:** {issue_data['status']}")
+                                
+                                # Description and match explanation
+                                st.markdown("**Description:**")
+                                st.markdown(issue_data['description'])
+                                
+                                st.markdown("**Why this matches:**")
+                                st.markdown(match['explanation'])
+                                
+                                # Created date
+                                st.markdown(f"**Created:** {pd.to_datetime(issue_data['created_at']).strftime('%Y-%m-%d %H:%M')}")
+                    
+                    except json.JSONDecodeError:
+                        st.error("Error parsing search results. Please try a different search query.")
+                
+                except Exception as e:
+                    st.error(f"Error during search: {str(e)}")
 
 def main():
     # Initialize session state for navigation if it doesn't exist
