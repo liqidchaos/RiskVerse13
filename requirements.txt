@@ -15,3 +15,4 @@ tiktoken
 matplotlib
 langchain-community
 groq
+docx
