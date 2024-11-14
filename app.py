@@ -162,7 +162,7 @@ def classify_issue(client, issue_description, pathways):
     valid_pathways = [p[0] for p in pathways]
     pathway_descriptions = {p[0]: p[1] for p in pathways}
     
-    # Create a focused prompt that encourages selection based only on the issue description
+    # Create a focused prompt
     prompt = f"""Given the following issue, identify the pathway that best represents the primary means or threat vector creating the impact.
 
 Issue Description: {issue_description}
@@ -170,31 +170,33 @@ Issue Description: {issue_description}
 Available Pathways:
 {chr(10).join(f'- {p}: {pathway_descriptions[p]}' for p in valid_pathways)}
 
-Instructions: Evaluate the issue based solely on its description and choose ONLY the name of the most appropriate pathway from the list. Do not provide any additional explanations—return only the pathway name.
+Instructions: Analyze the issue based solely on its description and choose ONLY the name of the most appropriate pathway from the list above. Do not provide any additional explanations—return only the pathway name.
 
 Selected pathway:"""
     
     try:
-        # Request the model response
+        # Use Groq's API with llama model
         response = client.chat.completions.create(
             messages=[{
-                "role": "user", 
+                "role": "user",
                 "content": prompt
             }],
-            model="llama-3.2-11b-vision-preview",
-            temperature=0,  # Consistent responses
-            max_tokens=30   # Limit to only pathway name
+            model="llama-3.2-11b-vision-preview",  # Use the same model as other parts of the application
+            temperature=0,
+            max_tokens=30,
+            top_p=1,
+            stream=False
         )
         
-        # Extract the content and clean it to ensure only the pathway name remains
+        # Extract the content
         result = response.choices[0].message.content.strip()
         result = result.replace('"', '').replace("'", "").strip()
         
-        # Direct match check: Ensure the response is valid by matching with pathways
+        # Direct match check
         if result in valid_pathways:
             return result
         
-        # Case-insensitive matching to handle minor variations
+        # Case-insensitive matching
         result_lower = result.lower()
         for pathway in valid_pathways:
             if pathway.lower() == result_lower:
@@ -202,15 +204,10 @@ Selected pathway:"""
             elif pathway.lower() in result_lower:
                 return pathway
         
-        # If no valid pathway is returned by the model, label as "Uncategorized" or as the original response
-        return result if result in valid_pathways else "Uncategorized"
+        return "Uncategorized"
         
     except Exception as e:
         print(f"Classification error: {str(e)}")
-        return "Classification Error"
-        
-    except Exception as e:
-        st.error(f"Classification error: {str(e)}")
         return "Classification Error"
 
 def find_issue_column(df):
@@ -307,12 +304,9 @@ def process_file(file, api_key):
     if not pathways:
         st.error("No pathways found! Please add pathways in the Pathway Management page first.")
         return None
-        
-    st.write(f"Found {len(pathways)} pathways for classification:")
-    for pathway, desc in pathways:
-        st.write(f"- {pathway}")
     
-    # Process the file
+    valid_pathways = [p[0] for p in pathways]
+    
     try:
         df = read_file(file)
         if df is None:
@@ -324,32 +318,111 @@ def process_file(file, api_key):
             st.warning("Could not automatically detect issue column")
             issue_column = st.selectbox("Select issue column:", df.columns)
         
-        # Add classification columns
-        df['Risk_Pathway'] = ''
-        
-        # Process issues
-        total = len(df)
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for idx, row in df.iterrows():
-            status_text.write(f"Processing issue {idx + 1} of {total}")
-            issue_text = str(row[issue_column])
+        # Add classification columns if not already present
+        if 'Risk_Pathway' not in df.columns:
+            df['Risk_Pathway'] = ''
+            df['User_Override'] = ''
             
-            # Classify the issue
-            pathway = classify_issue(client, issue_text, pathways)
-            df.at[idx, 'Risk_Pathway'] = pathway
+            # Initial classification with progress bar
+            progress_text = "Classifying issues..."
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            # Update progress
-            progress_bar.progress((idx + 1) / total)
+            total_issues = len(df)
+            for idx, row in df.iterrows():
+                status_text.write(f"Processing issue {idx + 1} of {total_issues}")
+                issue_text = str(row[issue_column])
+                pathway = classify_issue(client, issue_text, pathways)
+                df.at[idx, 'Risk_Pathway'] = pathway
+                progress_bar.progress((idx + 1) / total_issues)
+            
+            progress_bar.empty()
+            status_text.empty()
+            st.success("Initial classification complete!")
         
-        status_text.empty()
-        progress_bar.empty()
+        # Review interface
+        st.subheader("Review Classifications")
+        st.write("Review and suggest changes to classifications. Changes will be applied when you click 'Apply All Changes'.")
         
-        # Show results summary
-        pathway_counts = df['Risk_Pathway'].value_counts()
-        st.write("Classification Results:")
-        st.write(pathway_counts)
+        # Display classification summary and pending changes
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.subheader("Current Classification Summary")
+            summary = df['Risk_Pathway'].value_counts()
+            st.write(summary)
+        
+        with col2:
+            pending_overrides = df[df['User_Override'] != '']
+            st.subheader("Pending Changes")
+            st.write(f"Changes suggested: {len(pending_overrides)}")
+        
+        # Pagination controls
+        chunk_size = 10
+        total_chunks = len(df) // chunk_size + (1 if len(df) % chunk_size > 0 else 0)
+        chunk_index = st.number_input("Page", min_value=1, max_value=total_chunks, value=1) - 1
+        
+        start_idx = chunk_index * chunk_size
+        end_idx = min(start_idx + chunk_size, len(df))
+        
+        # Display issues for review
+        for idx in range(start_idx, end_idx):
+            with st.container():
+                col1, col2, col3 = st.columns([3, 2, 2])
+                with col1:
+                    st.text_area("Issue", df.iloc[idx][issue_column], height=100, key=f"issue_{idx}", disabled=True)
+                with col2:
+                    st.write("Current Classification:")
+                    st.write(df.iloc[idx]['Risk_Pathway'])
+                with col3:
+                    current_override = df.at[idx, 'User_Override'] or "Keep Current Classification"
+                    override = st.selectbox(
+                        "Suggest New Classification",
+                        ["Keep Current Classification"] + valid_pathways,
+                        index=["Keep Current Classification"] + valid_pathways.index(current_override) if current_override in valid_pathways else 0,
+                        key=f"override_{idx}"
+                    )
+                    if override != "Keep Current Classification":
+                        df.at[idx, 'User_Override'] = override
+                    elif current_override != "Keep Current Classification":
+                        df.at[idx, 'User_Override'] = ''
+                
+                st.markdown("---")
+        
+        # Show pending changes detail
+        if not pending_overrides.empty:
+            if st.checkbox("Show detailed changes"):
+                st.write("Pending classification changes:")
+                for _, row in pending_overrides.iterrows():
+                    st.write(f"• '{row[issue_column][:100]}...' will change from '{row['Risk_Pathway']}' to '{row['User_Override']}'")
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Apply All Changes"):
+                if not pending_overrides.empty:
+                    with st.spinner("Applying changes..."):
+                        # Apply overrides
+                        mask = df['User_Override'] != ''
+                        df.loc[mask, 'Risk_Pathway'] = df.loc[mask, 'User_Override']
+                        df['User_Override'] = ''  # Clear overrides after applying
+                    st.success("All changes applied successfully!")
+                    st.experimental_rerun()  # Refresh the page to show updated classifications
+                else:
+                    st.info("No changes to apply")
+                    
+        with col2:
+            if st.button("Finalize Classifications"):
+                final_df = df.drop('User_Override', axis=1)
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+                    final_df.to_excel(tmp.name, index=False)
+                    with open(tmp.name, 'rb') as f:
+                        st.download_button(
+                            label="Download Final Classifications",
+                            data=f,
+                            file_name="final_classifications.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                return final_df
         
         return df
         
