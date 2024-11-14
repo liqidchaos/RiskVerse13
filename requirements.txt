@@ -16,3 +16,4 @@ matplotlib
 langchain-community
 groq
 python-docx
+openpyxl
